@@ -1,17 +1,27 @@
 /**
  * Unit tests for the mailer seam — uses nodemailer's jsonTransport so no SMTP
- * server (or network) is involved. The org-name query is stubbed to return no
- * organization, so the mailer always falls back to ORG_NAME — whether or not a
- * real database is reachable through DATABASE_URL.
+ * server (or network) is involved. The org-name query is stubbed, so each test
+ * controls whether the database returns an organization, returns none, or fails.
  */
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import nodemailer from "nodemailer";
+
+const orgQuery = vi.hoisted(() => ({ rows: [] as Array<{ name: string }>, fail: false }));
 
 vi.mock("@workspace/db", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@workspace/db")>();
   return {
     ...actual,
-    db: { select: () => ({ from: () => ({ limit: async () => [] }) }) } as unknown as typeof actual.db,
+    db: {
+      select: () => ({
+        from: () => ({
+          limit: async () => {
+            if (orgQuery.fail) throw new Error("database unavailable");
+            return orgQuery.rows;
+          },
+        }),
+      }),
+    } as unknown as typeof actual.db,
   };
 });
 
@@ -34,6 +44,8 @@ describe("mailer", () => {
   beforeEach(() => {
     process.env.APP_BASE_URL = "https://board.example.com";
     process.env.ORG_NAME = "Test Org";
+    orgQuery.rows = [];
+    orgQuery.fail = false;
     mailer._setTransportForTests(jsonTransport());
   });
 
@@ -60,6 +72,21 @@ describe("mailer", () => {
     // Product-neutral wording — org name from env/DB, no hardcoded brand.
     expect(msg.subject).toContain("Test Org");
     expect(msg.text).not.toMatch(/open board/i);
+  });
+
+  it("uses the organization name from the database when one exists", async () => {
+    orgQuery.rows = [{ name: "Stored Org" }];
+    const info: any = await mailer.sendPasswordResetEmail("user@example.com", "Ursula User", TOKEN);
+    const msg = JSON.parse(info.message);
+    expect(msg.subject).toContain("Stored Org");
+    expect(msg.subject).not.toContain("Test Org");
+  });
+
+  it("falls back to ORG_NAME when the organization query fails", async () => {
+    orgQuery.fail = true;
+    const info: any = await mailer.sendPasswordResetEmail("user@example.com", "Ursula User", TOKEN);
+    const msg = JSON.parse(info.message);
+    expect(msg.subject).toContain("Test Org");
   });
 
   it("invite email contains the set-password link and NO password", async () => {
