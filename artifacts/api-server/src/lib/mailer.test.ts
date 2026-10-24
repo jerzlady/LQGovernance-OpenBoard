@@ -1,11 +1,19 @@
 /**
  * Unit tests for the mailer seam — uses nodemailer's jsonTransport so no SMTP
- * server (or network) is involved. Runs without a real database: @workspace/db
- * only needs DATABASE_URL to be SET at import; the org-name query then fails
- * fast and the mailer falls back to ORG_NAME.
+ * server (or network) is involved. The org-name query is stubbed to return no
+ * organization, so the mailer always falls back to ORG_NAME — whether or not a
+ * real database is reachable through DATABASE_URL.
  */
-import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import nodemailer from "nodemailer";
+
+vi.mock("@workspace/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@workspace/db")>();
+  return {
+    ...actual,
+    db: { select: () => ({ from: () => ({ limit: async () => [] }) }) } as unknown as typeof actual.db,
+  };
+});
 
 const TOKEN = "abc123token456";
 
@@ -17,8 +25,8 @@ describe("mailer", () => {
   let mailer: typeof import("./mailer");
 
   beforeAll(async () => {
-    // @workspace/db throws at import when DATABASE_URL is unset; a dead URL is
-    // fine — getOrgName catches the query failure and uses ORG_NAME.
+    // @workspace/db throws at import when DATABASE_URL is unset; the query itself
+    // is stubbed above, so any URL will do here.
     process.env.DATABASE_URL ||= "postgresql://nobody:nothing@127.0.0.1:9/nodb";
     mailer = await import("./mailer");
   });
