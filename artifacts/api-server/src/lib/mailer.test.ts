@@ -1,11 +1,29 @@
 /**
  * Unit tests for the mailer seam — uses nodemailer's jsonTransport so no SMTP
- * server (or network) is involved. Runs without a real database: @workspace/db
- * only needs DATABASE_URL to be SET at import; the org-name query then fails
- * fast and the mailer falls back to ORG_NAME.
+ * server (or network) is involved. The org-name query is stubbed, so each test
+ * controls whether the database returns an organization, returns none, or fails.
  */
-import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import nodemailer from "nodemailer";
+
+const orgQuery = vi.hoisted(() => ({ rows: [] as Array<{ name: string }>, fail: false }));
+
+vi.mock("@workspace/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@workspace/db")>();
+  return {
+    ...actual,
+    db: {
+      select: () => ({
+        from: () => ({
+          limit: async () => {
+            if (orgQuery.fail) throw new Error("database unavailable");
+            return orgQuery.rows;
+          },
+        }),
+      }),
+    } as unknown as typeof actual.db,
+  };
+});
 
 const TOKEN = "abc123token456";
 
@@ -17,8 +35,8 @@ describe("mailer", () => {
   let mailer: typeof import("./mailer");
 
   beforeAll(async () => {
-    // @workspace/db throws at import when DATABASE_URL is unset; a dead URL is
-    // fine — getOrgName catches the query failure and uses ORG_NAME.
+    // @workspace/db throws at import when DATABASE_URL is unset; the query itself
+    // is stubbed above, so any URL will do here.
     process.env.DATABASE_URL ||= "postgresql://nobody:nothing@127.0.0.1:9/nodb";
     mailer = await import("./mailer");
   });
@@ -26,6 +44,8 @@ describe("mailer", () => {
   beforeEach(() => {
     process.env.APP_BASE_URL = "https://board.example.com";
     process.env.ORG_NAME = "Test Org";
+    orgQuery.rows = [];
+    orgQuery.fail = false;
     mailer._setTransportForTests(jsonTransport());
   });
 
@@ -52,6 +72,21 @@ describe("mailer", () => {
     // Product-neutral wording — org name from env/DB, no hardcoded brand.
     expect(msg.subject).toContain("Test Org");
     expect(msg.text).not.toMatch(/open board/i);
+  });
+
+  it("uses the organization name from the database when one exists", async () => {
+    orgQuery.rows = [{ name: "Stored Org" }];
+    const info: any = await mailer.sendPasswordResetEmail("user@example.com", "Ursula User", TOKEN);
+    const msg = JSON.parse(info.message);
+    expect(msg.subject).toContain("Stored Org");
+    expect(msg.subject).not.toContain("Test Org");
+  });
+
+  it("falls back to ORG_NAME when the organization query fails", async () => {
+    orgQuery.fail = true;
+    const info: any = await mailer.sendPasswordResetEmail("user@example.com", "Ursula User", TOKEN);
+    const msg = JSON.parse(info.message);
+    expect(msg.subject).toContain("Test Org");
   });
 
   it("invite email contains the set-password link and NO password", async () => {
